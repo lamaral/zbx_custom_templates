@@ -44,9 +44,6 @@ stat_url = 'http://localhost/nginx_stat'
 # Optional Basic Auth
 username = 'user'
 password = 'pass'
-
-# Temp file, with log file cursor position
-seek_file = '/tmp/nginx_log_stat'
 ```
 
 3) In the script path (`/etc/zabbix/script/nginx/`) do:

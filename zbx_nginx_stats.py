@@ -7,18 +7,16 @@ try:
 except:
     import simplejson as json
 
-
-
 #####################################################################
 #
 # SETTINGS SECTION
 #
 #####################################################################
 
-zabbix_host = '127.0.0.1'   # Zabbix server IP
-zabbix_port = 10051         # Zabbix server port
-hostname = 'Zabbix Agent'   # Name of monitored host, like it is shown on Zabbix WebUI
-time_delta = 1              # grep interval in minutes
+zabbix_host = '127.0.0.1'  # Zabbix server IP
+zabbix_port = 10051  # Zabbix server port
+hostname = 'Zabbix Agent'  # Name of monitored host, like it is shown on Zabbix WebUI
+time_delta = 1  # grep interval in minutes
 
 # URL to Nginx stat (http_stub_status_module)
 stat_url = 'http://localhost/nginx_stat'
@@ -26,10 +24,6 @@ stat_url = 'http://localhost/nginx_stat'
 # Optional Basic Auth
 username = 'user'
 password = 'pass'
-
-# Temp file, with log file cursor position
-seek_file = '/tmp/nginx_log_stat'
-
 
 #####################################################################
 #
@@ -43,6 +37,9 @@ args = parser.parse_args()
 
 nginx_log_file_path = args.logfile
 filename = os.path.basename(nginx_log_file_path)
+
+# Temp file, with log file cursor position
+seek_file = '/tmp/seek_'+filename
 
 class Metric(object):
     def __init__(self, host, key, value, clock=None):
@@ -58,50 +55,50 @@ class Metric(object):
 
 
 def send_to_zabbix(metrics, zabbix_host='127.0.0.1', zabbix_port=10051):
-    j = json.dumps
     metrics_data = []
     for m in metrics:
         clock = m.clock or ('%d' % time.time())
-        metrics_data.append(
-            ('{"host":%s,"key":%s,"value":%s,"clock":%s}') % (j(m.host), j(m.key), j(m.value), j(clock)))
-    json_data = ('{"request":"sender data","data":[%s]}') % (','.join(metrics_data))
-    data_len = struct.pack('<Q', len(json_data))
-    packet = 'ZBXD\x01' + data_len + json_data
+        data = {
+            "host": m.host,
+            "key": m.key,
+            "value": m.value,
+            "clock": clock
+        }
+        metrics_data.append(data)
 
-    # print packet
-    # print ':'.join(x.encode('hex') for x in packet)
+    data_json = {
+        "request": "sender data",
+        "data": metrics_data
+    }
+    HEADER = "ZBXD\1"
+    data_json_str = json.dumps(data_json)
+    data_len = len(data_json_str)
+    data_header = struct.pack('<Q', data_len)
+    packet = HEADER.encode() + data_header + data_json_str.encode()
 
     try:
-        zabbix = socket.socket()
+        zabbix = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         zabbix.connect((zabbix_host, zabbix_port))
-        zabbix.sendall(packet)
-        resp_hdr = _recv_all(zabbix, 13)
-        if not resp_hdr.startswith('ZBXD\x01') or len(resp_hdr) != 13:
-            print('Wrong zabbix response')
+        zabbix.send(packet)
+    except Exception as err:
+        print("Error connecting to Zabbix server -- {0}".format(err))
+        return False
+    else:
+        resp_hdr = zabbix.recv(5).decode()
+        if not resp_hdr == 'ZBXD\1':
+            print('Wrong zabbix response: %s' % resp_hdr)
             return False
-        resp_body_len = struct.unpack('<Q', resp_hdr[5:])[0]
+        resp_data_header = zabbix.recv(8)
+        resp_body_len = struct.unpack('<Q', resp_data_header)[0]
         resp_body = zabbix.recv(resp_body_len)
         zabbix.close()
 
-        resp = json.loads(resp_body)
+        resp = json.loads(resp_body.decode())
         # print resp
         if resp.get('response') != 'success':
             print(('Got error from Zabbix: %s') % resp)
             return False
         return True
-    except:
-        print('Error while sending data to Zabbix')
-        return False
-
-
-def _recv_all(sock, count):
-    buf = ''
-    while len(buf) < count:
-        chunk = sock.recv(count - len(buf))
-        if not chunk:
-            return buf
-        buf += chunk
-    return buf
 
 
 def get(url, login, passwd):
@@ -181,25 +178,15 @@ res_code = {
 }
 
 req_time = {
-    'OPTIONS': [],
+    'OTHER': [],
     'GET': [],
-    'HEAD': [],
     'POST': [],
-    'PUT': [],
-    'DELETE': [],
-    'TRACE': [],
-    'CONNECT': [],
 }
 
 res_time = {
-    'OPTIONS': [],
+    'OTHER': [],
     'GET': [],
-    'HEAD': [],
     'POST': [],
-    'PUT': [],
-    'DELETE': [],
-    'TRACE': [],
-    'CONNECT': [],
 }
 
 nf = open(nginx_log_file_path, 'r')
@@ -210,8 +197,6 @@ new_seek = seek = read_seek(seek_file)
 if os.path.getsize(nginx_log_file_path) > seek:
     nf.seek(seek)
 
-d = "14/Jan/2017:13:37"
-
 line = nf.readline()
 while line:
     if d in line:
@@ -221,8 +206,10 @@ while line:
         sec = int(match.group(1))
         req = match.group(2)
         code = match.group(3)
-        req_time[req].append(float(match.group(4)))
-        res_time[req].append(float(match.group(5)))
+        req_time[req].append(float(match.group(4))) if req in req_time else req_time['OTHER'].append(
+            float(match.group(4)))
+        res_time[req].append(float(match.group(5))) if req in res_time else res_time['OTHER'].append(
+            float(match.group(4)))
         if code in res_code:
             res_code[code] += 1
         else:
@@ -239,11 +226,11 @@ nf.close()
 data_to_send = []
 
 # Adding the metrics to response
-# data = get(stat_url, username, password).split('\n')
-# data = parse_nginx_stat(data)
+data = get(stat_url, username, password).decode().split('\n')
+data = parse_nginx_stat(data)
 
-# for i in data:
-#     data_to_send.append(Metric(hostname, ('nginx.%s[%s]' % (i,filename)), data[i]))
+for i in data:
+    data_to_send.append(Metric(hostname, ('nginx.%s[%s]' % (i, filename)), data[i]))
 
 # Adding the request per seconds to response
 for t in range(0, 60):
@@ -263,5 +250,4 @@ res_time = {x: sum(res_time[x]) / float(len(res_time[x])) for x in res_time if l
 for t in res_time:
     data_to_send.append(Metric(hostname, ('nginx.avg_res[%s,%s]' % (filename, t)), res_time[t]))
 
-print(data_to_send)
-# send_to_zabbix(data_to_send, zabbix_host, zabbix_port)
+send_to_zabbix(data_to_send, zabbix_host, zabbix_port)
